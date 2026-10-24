@@ -19,15 +19,32 @@ to_download = ['ids_test.pkl',
  'index_test.faiss',
  'arxiv_processed_test.csv']
 
-# Download files
+# Download files with fallback to live arXiv fetch
 base_url = "https://miguelpeixoto.net/paper_recommendation_system/"
+download_failed = False
 
 for file in to_download:
     url = join(base_url, file)
     print(f"[+] Downloading {url}")
-    r = requests.get(url, allow_redirects=True, stream=True)
-    with open(join(data_dir, file), "wb") as f:
-        for chunk in tqdm(r.iter_content(chunk_size=1024)):
-            if chunk:
-                f.write(chunk)
+    try:
+        r = requests.get(url, allow_redirects=True, stream=True, timeout=5)
+        if r.status_code != 200:
+            print(f"[-] Could not download {file} (status {r.status_code})")
+            download_failed = True
+            break
+        with open(join(data_dir, file), "wb") as f:
+            for chunk in tqdm(r.iter_content(chunk_size=1024)):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        print(f"[-] Error downloading {file}: {e}")
+        download_failed = True
+        break
+
+if download_failed:
+    print("[!] Remote checkpoint unavailable. Building checkpoint directly from arXiv...")
+    from data_handling.fetch_and_build import fetch_papers, build_index
+    df = fetch_papers()
+    build_index(df)
+
 

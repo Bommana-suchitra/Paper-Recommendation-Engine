@@ -1,0 +1,11 @@
+streamlit>=1.20.0
+torch
+sentence-transformers
+faiss-cpu
+pdf2image
+pillow
+pandas
+numpy
+tqdm
+requests
+arxiv

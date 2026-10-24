@@ -1,4 +1,4 @@
-# Streamlit app
+# Streamlit app - Enhanced Modern UI
 import sys
 import os
 
@@ -8,16 +8,13 @@ import streamlit as st
 import faiss
 import numpy as np
 import pandas as pd
+import torch
 from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
-import gc
 import time
-from os.path import join
-import pickle
+from os.path import join, exists
 import json
-import multiprocessing
-from multiprocessing import Pool
-
+import html
+from concurrent.futures import ThreadPoolExecutor
 
 from config import data_dir, thumbnail_dir, testing
 from utils import get_thumbnail, get_url
@@ -26,265 +23,388 @@ from utils import get_thumbnail, get_url
 # Explicitly set the environment variable TOKENIZERS_PARALLELISM to false
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Make page width a little wider
+# Page Configuration
 st.set_page_config(
-    page_title="Paper Recommendation Engine",
-    # Icon from web
-    page_icon="https://www.flaticon.com/svg/static/icons/svg/25/25231.svg",
+    page_title="Paper Intelligence - Neural Recommendation Engine",
+    page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="auto",
+    initial_sidebar_state="expanded",
     menu_items={
         "Get Help": "https://github.com/mcpeixoto/PaperRecomenderSystem",
-        "About": "Web interface to search ArXiv papers using NLP Sentence-Transformers, Faiss and Streamlit ",
+        "About": "Modern Semantic Academic Paper Recommendation Engine powered by FAISS & Sentence-Transformers",
     },
 )
 
-if not hasattr(st.session_state, "selected_categories"):
+# Load External Stylesheet
+css_path = join(os.path.dirname(__file__), "style.css")
+if exists(css_path):
+    with open(css_path, "r", encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# Cache decorator compatibility
+cache_resource = getattr(st, "cache_resource", getattr(st, "experimental_singleton", lambda f: f))
+
+def rerun_app():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
+if "selected_categories" not in st.session_state:
     st.session_state.selected_categories = []
 
-@st.experimental_singleton
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""
+
+
+@cache_resource
 def load_data():
-    print("Loading data!")
-    if testing:
-        data = pd.read_csv(join(data_dir, "arxiv_processed_test.csv"), dtype=str)
-    else:
-        data = pd.read_csv(join(data_dir, "arxiv_processed.csv"), dtype=str)
-    return data
+    target = join(data_dir, "arxiv_processed_test.csv") if testing else join(data_dir, "arxiv_processed.csv")
+    if not exists(target):
+        st.info("Dataset not found. Generating initial dataset from arXiv...")
+        from data_handling.fetch_and_build import fetch_papers, build_index
+        df = fetch_papers()
+        build_index(df)
+    return pd.read_csv(target, dtype=str)
 
 
-@st.experimental_singleton
+@cache_resource
 def load_model():
-    print("Loading model!")
-    model = SentenceTransformer("all-mpnet-base-v2", device="cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = SentenceTransformer("all-mpnet-base-v2", device=device)
     return model
 
 
-@st.experimental_singleton
+@cache_resource
 def load_index():
-    print("Loading index!")
-
-    if testing:
-        index = faiss.read_index(join(data_dir, "index_test.faiss"))
-    else:
-        index = faiss.read_index(join(data_dir, "index.faiss"))
-
-    return index
+    target = join(data_dir, "index_test.faiss") if testing else join(data_dir, "index.faiss")
+    if not exists(target):
+        st.info("FAISS index not found. Generating index...")
+        from data_handling.fetch_and_build import fetch_papers, build_index
+        df = fetch_papers()
+        build_index(df)
+    return faiss.read_index(target)
 
 
 def load_user_tags():
-    print("Loading user tags!")
-    with open("tags.json", "r") as f:
-        user_tags = json.load(f)
-
-    return user_tags
+    if not exists("tags.json"):
+        return {}
+    try:
+        with open("tags.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def get_user_tags_from_query(query, user_tag_keys, model):
-    # This will embedd the query and then compare it to the user tags (key + values)
+    if not user_tag_keys:
+        return []
 
-    # Get the embeddings of the query
     query_embedding = model.encode(query, convert_to_tensor=True).cpu()
-
-    # Get the embeddings of the user tags
-    to_encode = [f"{key} - {','.join(value)}" for key, value in load_user_tags().items() if key in user_tag_keys]
+    all_tags = load_user_tags()
+    to_encode = [f"{key} - {','.join(all_tags[key])}" for key in user_tag_keys if key in all_tags]
+    if not to_encode:
+        return []
     user_tags_embeddings = model.encode(to_encode, convert_to_tensor=True).cpu()
-
-    # Compute the dot product
     dot_product = np.dot(query_embedding, user_tags_embeddings.T)
 
-    # Get the tags and probabilities
-    return [(tag, prob) for tag, prob in zip(user_tag_keys, dot_product)]
+    return [(tag, float(prob)) for tag, prob in zip(user_tag_keys, dot_product)]
 
 
-model = load_model()
+# Load models and data
 data = load_data()
+model = load_model()
 index = load_index()
 user_tags = load_user_tags()
 
 
 def draw_sidebar():
-    """Should include dynamically generated filters"""
-
     with st.sidebar:
-        # Filter by category of our data
-        categories = data["categories"].unique()
+        st.markdown("""
+        <div style="padding: 10px 0 20px 0;">
+            <h2 style="margin: 0; font-size: 1.4rem; background: linear-gradient(135deg, #a78bfa, #38bdf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                ⚙️ Engine Control
+            </h2>
+            <p style="font-size: 0.85rem; color: #64748b; margin: 4px 0 0 0;">Neural filters and metadata tagging</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Sidebar
-        st.sidebar.header("Filters")
-        st.sidebar.subheader("By Category")
+        # Category Filter
+        all_cats = set()
+        for cat_str in data["categories"].dropna().unique():
+            for c in str(cat_str).split():
+                all_cats.add(c)
+        categories = sorted(list(all_cats))
 
-        # multiselect
-        selected_categories = st.sidebar.multiselect("Select categories", categories)
+        st.subheader("Filter by Category")
+        selected_categories = st.multiselect(
+            "Select specific arXiv disciplines",
+            categories,
+            default=st.session_state.selected_categories,
+            placeholder="All disciplines..."
+        )
 
-        # Add a button to apply the filters
-        if st.sidebar.button("Apply filters"):
-            st.session_state.selected_categories = selected_categories
+        col_apply, col_clear = st.columns(2)
+        with col_apply:
+            if st.button("Apply Filter", use_container_width=True):
+                st.session_state.selected_categories = selected_categories
+                rerun_app()
+        with col_clear:
+            if st.button("Reset", use_container_width=True):
+                st.session_state.selected_categories = []
+                rerun_app()
 
-            # Reload the page
-            st.experimental_rerun()
+        st.markdown("<hr style='border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 24px 0;'>", unsafe_allow_html=True)
 
-        # Show user tags
-        st.sidebar.markdown("---")
-        st.sidebar.header("User Tags")
+        # User Tags
+        st.subheader(f"User Tags ({len(user_tags)})")
+        tag_pills_html = " ".join([
+            f"<span class='user-tag-pill'>{tag}</span>" for tag in list(user_tags.keys())[:12]
+        ])
+        st.markdown(f"<div class='pills-row' style='margin-bottom: 15px;'>{tag_pills_html}</div>", unsafe_allow_html=True)
 
-        # Show the user tags
-        st.sidebar.subheader("Your tags:")
-        st.sidebar.write(", ".join(user_tags.keys()))
+        with st.expander("➕ Add Custom Tag", expanded=False):
+            new_tag = st.text_input("Tag Name", placeholder="e.g. LLM Reasoning")
+            new_tag_values = st.text_input("Keywords", placeholder="chain of thought, reasoning, deduction")
+            if st.button("Save Tag", use_container_width=True):
+                if new_tag and new_tag_values:
+                    user_tags[new_tag] = [v.strip() for v in new_tag_values.split(",") if v.strip()]
+                    with open("tags.json", "w", encoding="utf-8") as f:
+                        json.dump(user_tags, f, indent=2)
+                    st.success(f"Added tag '{new_tag}'!")
+                    rerun_app()
 
-        # Add a new user tag
-        st.sidebar.subheader("Add a new User Tag")
-        new_tag = st.sidebar.text_input("Tag name")
-        new_tag_values = st.sidebar.text_input("Tag values (comma separated)")
-
-        if st.sidebar.button("Add tag"):
-            user_tags[new_tag] = new_tag_values.split(",")
-            with open("tags.json", "w") as f:
-                json.dump(user_tags, f)
-
-            # Reload the page
-            st.experimental_rerun()
-
-        # Remove a user tag
-        st.sidebar.subheader("Remove a User Tag")
-        remove_tag = st.sidebar.selectbox("Select tag to remove", list(user_tags.keys()))
-
-        if st.sidebar.button("Remove tag"):
-            user_tags.pop(remove_tag)
-            with open("tags.json", "w") as f:
-                json.dump(user_tags, f)
-
-            # Reload the page
-            st.experimental_rerun()
-
-        # Remove all user tags
-        st.sidebar.subheader("Remove **ALL** User Tags (Dangerous)")
-        if st.sidebar.button("Remove all tags"):
-            user_tags.clear()
-            with open("tags.json", "w") as f:
-                json.dump(user_tags, f)
-
-            # Reload the page
-            st.experimental_rerun()
-
-        # Notes:
-        st.sidebar.subheader("Notes")
-        st.sidebar.write("**You can directly edit the tags.json file to add or remove new tags**")
+        if user_tags:
+            with st.expander("🗑️ Manage Tags", expanded=False):
+                remove_tag = st.selectbox("Select tag to remove", list(user_tags.keys()))
+                if st.button("Remove Selected Tag", use_container_width=True):
+                    user_tags.pop(remove_tag, None)
+                    with open("tags.json", "w", encoding="utf-8") as f:
+                        json.dump(user_tags, f, indent=2)
+                    rerun_app()
 
 
 def main():
-    st.title("Paper Recommendation Engine")
-    query = st.text_input("Search query")
+    # Hero Section
+    st.markdown("""
+    <div class="hero-container">
+        <div class="hero-badge">
+            <span>✨</span> Next-Gen Academic Intelligence
+        </div>
+        <h1 class="hero-title">Paper Recommendation Engine</h1>
+        <p class="hero-subtitle">
+            Instant semantic discovery across arXiv academic papers. Leveraging dense 768-dimensional sentence transformer embeddings and accelerated vector search.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Telemetry System Grid
+    device_name = "NVIDIA RTX 4050 (CUDA)" if torch.cuda.is_available() else "Standard CPU"
+    st.markdown(f"""
+    <div class="telemetry-grid">
+        <div class="telemetry-card">
+            <div class="telemetry-icon">📚</div>
+            <div class="telemetry-content">
+                <span class="telemetry-label">Corpus Size</span>
+                <span class="telemetry-value">{len(data)} Verified Papers</span>
+            </div>
+        </div>
+        <div class="telemetry-card">
+            <div class="telemetry-icon">⚡</div>
+            <div class="telemetry-content">
+                <span class="telemetry-label">Embedding Model</span>
+                <span class="telemetry-value">all-mpnet-base-v2 (768-d)</span>
+            </div>
+        </div>
+        <div class="telemetry-card">
+            <div class="telemetry-icon">🚀</div>
+            <div class="telemetry-content">
+                <span class="telemetry-label">Compute Engine</span>
+                <span class="telemetry-value">{device_name}</span>
+            </div>
+        </div>
+        <div class="telemetry-card">
+            <div class="telemetry-icon">🔍</div>
+            <div class="telemetry-content">
+                <span class="telemetry-label">Vector Database</span>
+                <span class="telemetry-value">FAISS IndexFlatIP</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     draw_sidebar()
 
-    # make the num result a input box
-    k = st.number_input("Number of results", 1, 50, 10)
+    def set_query(new_q):
+        st.session_state.search_query = new_q
+
+    # Quick Suggestion Chips
+    st.markdown("<div class='quick-search-label'>💡 Quick Explore Prompts:</div>", unsafe_allow_html=True)
+    chip_cols = st.columns(5)
+    suggestions = [
+        "Attention & Transformers",
+        "Latent Diffusion Models",
+        "Reinforcement Learning (RLHF)",
+        "Quantum Entanglement",
+        "Residual Neural Networks"
+    ]
+    for idx, (col, sug) in enumerate(zip(chip_cols, suggestions)):
+        with col:
+            st.button(f"🔎 {sug}", key=f"sug_{idx}", use_container_width=True, on_click=set_query, args=(sug,))
+
+    # Search Bar & Result Controls
+    search_col, count_col = st.columns([4, 1])
+    with search_col:
+        query = st.text_input(
+            "Search Query",
+            key="search_query",
+            placeholder="Search topics, methods, equations, or concepts (e.g. self-attention, generative diffusion, RLHF)...",
+            label_visibility="collapsed"
+        )
+    with count_col:
+        k = st.number_input("Results limit", 1, min(50, len(data)), min(10, len(data)), label_visibility="collapsed")
+
 
     if query:
         start_time = time.time()
-        D, I = index.search(model.encode(query).reshape(1, -1), k)
+        query_vec = model.encode(query, normalize_embeddings=True).reshape(1, -1)
+        D, I = index.search(query_vec.astype(np.float32), k)
         end_time = time.time()
+        elapsed = end_time - start_time
 
-        df = pd.DataFrame()
+        rows = []
         for idx, score in zip(I[0], D[0]):
-            to_add = data.iloc[idx]
+            if 0 <= idx < len(data):
+                row_dict = data.iloc[idx].to_dict()
+                row_dict["score"] = float(score)
+                rows.append(row_dict)
 
-            # Add score
-            to_add["score"] = score
+        df = pd.DataFrame(rows)
 
-            df = pd.concat([df, to_add], axis=1)
+        # Concurrently fetch any available thumbnails
+        futures = []
+        with ThreadPoolExecutor(max_workers=min(max(len(df), 1), 8)) as executor:
+            for _, row in df.iterrows():
+                futures.append(executor.submit(get_thumbnail, get_url(row["id"])))
 
-        df = df.T
-
-        # df.columns - # ['id', 'abstract', 'title', 'doi', 'categories', 'update_date', 'authors_parsed', 'score']
-
-        ##########################################
-        # Show results
-        ##########################################
-
-        # Iterate over rows to multiprocess the get_thumbnail function
-        pool = Pool(len(df))
-        processes = []
-        for _, row in df.iterrows():
-            processes.append(pool.apply_async(get_thumbnail, (get_url(row["id"]),)))
-        pool.close()  # no more tasks
+        # Header Results Banner
+        st.markdown(f"""
+        <div class="results-header-banner">
+            <span>✨ Neural match complete: retrieved top <b>{len(df)}</b> papers</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">⚡ {elapsed*1000:.1f}ms latency</span>
+        </div>
+        """, unsafe_allow_html=True)
 
         i = 0
+        displayed = 0
         for _, row in df.iterrows():
-
-            title = row["title"].replace("\n", " ").replace("\t", " ").replace("[", " ").replace("]", " ").replace("'", " ")
+            title = str(row.get("title", "")).replace("\n", " ").replace("\t", " ").strip()
             url = get_url(row["id"])
-            authors = eval(row["authors_parsed"])
-            authors = [x[1] + " " + x[0] for x in authors]
+            pdf_url = url.replace("abs", "pdf")
 
-            # If category not in st.session_state.selected_categories
-            categories = row["categories"].split()
+            # Parse Authors
+            raw_authors = str(row.get("authors_parsed", "[]"))
+            try:
+                authors_list = eval(raw_authors)
+                authors = [x[1] + " " + x[0] if (len(x) > 1 and x[1]) else x[0] for x in authors_list]
+            except Exception:
+                authors = []
+
+            # Category filter check
+            categories = str(row.get("categories", "")).split()
             if len(st.session_state.selected_categories) > 0:
-                c = True
-                for cat in categories:
-                    if cat in st.session_state.selected_categories:
-                        c = False
-                if c:
+                has_match = any(cat in st.session_state.selected_categories for cat in categories)
+                if not has_match:
+                    i += 1
                     continue
 
-            if len(authors) > 3:
-                authors = ", ".join(authors[:3]) + " et al."
+            authors_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "") if authors else "Authors Unspecified"
+            clean_abstract = " ".join(str(row.get('abstract', '')).split())
+            escaped_title = html.escape(title)
+            escaped_abstract = html.escape(clean_abstract)
+            escaped_authors = html.escape(authors_str)
+            score_val = round(row['score'] * 100)
+
+            # Score badge class
+            if score_val >= 45:
+                score_class = "score-high"
+                score_label = f"🎯 {score_val}% Match"
+            elif score_val >= 35:
+                score_class = "score-mid"
+                score_label = f"⚡ {score_val}% Match"
             else:
-                authors = ", ".join(authors)
+                score_class = "score-low"
+                score_label = f"🔍 {score_val}% Match"
 
-            # Add Score and Title with link
-            # Author, date, categories
-            # categories should be blue
+            # Category badges
+            cat_pills = "".join([f"<span class='category-pill'>{html.escape(c)}</span>" for c in categories])
 
-            html = f"""
-                ### [**{round(row['score']*100)}**] - :red[[{title}]({url})]  
-                <font size="5"> *{authors}*  <br>
-                {row['update_date']} - :blue[{row['categories'].replace(' ', ', ')}]"""
+            # User Tags
+            user_tag_list = get_user_tags_from_query(
+                title + " " + clean_abstract,
+                list(user_tags.keys()),
+                model
+            )
+            matching_user_tags = [
+                f"<span class='user-tag-pill'>🏷️ {html.escape(tag)} ({round(prob*100)}%)</span>"
+                for tag, prob in user_tag_list if prob > 0.5
+            ]
+            user_tags_html = "".join(matching_user_tags)
 
-            ###################
-            #### User Tags ####
-            ###################
+            card_html = (
+                f'<div class="paper-card">'
+                f'<div class="card-top-bar">'
+                f'<span class="score-badge {score_class}">{score_label}</span>'
+                f'<span class="meta-date">📅 {row.get("update_date", "N/A")} &bull; arXiv:{row["id"]}</span>'
+                f'</div>'
+                f'<div class="paper-title">'
+                f'<a href="{url}" target="_blank">{escaped_title} <span style="font-size: 0.9rem; opacity: 0.7;">↗</span></a>'
+                f'</div>'
+                f'<div class="paper-authors">'
+                f'<span>👥</span> <span>{escaped_authors}</span>'
+                f'</div>'
+                f'<div class="pills-row">'
+                f'{cat_pills}'
+                f'{user_tags_html}'
+                f'</div>'
+                f'<div class="abstract-box">'
+                f'{escaped_abstract}'
+                f'</div>'
+                f'<div class="card-actions">'
+                f'<a class="action-btn btn-primary" href="{url}" target="_blank">📄 View on arXiv</a>'
+                f'<a class="action-btn btn-secondary" href="{pdf_url}" target="_blank">📥 Direct PDF</a>'
+                f'</div>'
+                f'</div>'
+            )
+            if hasattr(st, "html"):
+                st.html(card_html)
+            else:
+                st.markdown(card_html, unsafe_allow_html=True)
 
-            user_tag_list = get_user_tags_from_query(row["title"] + " " + row["abstract"], user_tags, model)
-            if any([prob > 0.5 for tag, prob in user_tag_list]):
-                html += f"""<br> <font size="4"> User Tags: """
-                for tag, prob in user_tag_list:
-                    if prob > 0.5:
-                        html += f":red[[{tag}] ({round(prob*100)}%)], "
-                # Remove last ,
-                html = html[:-2]
-
-            # Show html
-            st.markdown(html, unsafe_allow_html=True)
-
-            ###################
-            #### Thumbnail ####
-            ###################
-
-            thumbnail = processes[i].get()  # get the result from the process
+            # Thumbnail preview if available
+            try:
+                thumbnail = futures[i].result()
+            except Exception:
+                thumbnail = None
             i += 1
 
-            # Add thumbnail
             if thumbnail:
-                st.image(thumbnail, use_column_width=True)
+                try:
+                    st.image(thumbnail, use_container_width=True)
+                except TypeError:
+                    st.image(thumbnail, use_column_width=True)
 
-            ##################
-            #### Abstract ####
-            ##################
+            displayed += 1
 
-            # Add abstract with normal text
-            st.markdown(
-                f"""
-            <font size="4.5">
-                {row['abstract']}
-            """,
-                unsafe_allow_html=True,
-            )
-
-            st.markdown("---")
-
-        # Show sucessful query message and tell how many documents we passed
-        st.success(f"Found {len(I[0])} results in {end_time - start_time:.2f} seconds on database of {len(data)} papers.")
+        if displayed == 0:
+            st.warning("No papers matched your query under the currently active category filters. Try clearing or expanding your filter selection.")
+    else:
+        st.markdown("""
+        <div style="text-align: center; padding: 40px 20px; color: #64748b;">
+            <p style="font-size: 1.1rem; margin-bottom: 8px;">Enter a topic, query, or select one of the Quick Explore suggestions above.</p>
+            <p style="font-size: 0.85rem;">The neural engine will compute cosine similarity across 768-dimensional paper embeddings in milliseconds.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

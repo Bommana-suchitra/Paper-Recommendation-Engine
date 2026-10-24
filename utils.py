@@ -47,14 +47,22 @@ def get_thumbnail(arxiv_url):
 
     # Download pdf, concatenate the pages horizontally and convert to png
     try:
-        urllib.request.urlretrieve(thumbnail_url, join(thumbnail_dir, arxiv_id + ".pdf"))
+        import requests
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(thumbnail_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        with open(pdf_path, "wb") as f:
+            f.write(resp.content)
 
         # Read pdf
         images = convert_from_path(pdf_path)
     except Exception as e:
-        print(f"[-] Couldn't download pdf for {arxiv_id}")
-        print("URL: " + thumbnail_url)
-        print(e)
+        if exists(pdf_path):
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
         return None
 
     # Generate thumbnail by concatenating the pdf pages horizontally and converting to png

@@ -28,11 +28,16 @@ class FaissIdx:
         # Inicialize ids
         self.ids = []
 
-        # Use GPU
-        if self.use_gpu:
-            self.use_gpu()
-        res = faiss.StandardGpuResources()
-        self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+        # Use GPU if available
+        if self.use_gpu and hasattr(faiss, "StandardGpuResources"):
+            try:
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+            except Exception as e:
+                print(f"[!] GPU Faiss init failed: {e}. Using CPU.")
+                self.use_gpu = False
+        else:
+            self.use_gpu = False
 
 
     def add_doc(self, data):
