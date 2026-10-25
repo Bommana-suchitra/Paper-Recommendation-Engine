@@ -14,7 +14,7 @@ The **Paper Recommendation Engine** solves this by converting paper titles and a
 - **Semantic Vector Search**: Retrieve papers by meaning and conceptual similarity rather than exact keyword matches.
 - **Dynamic Relevance Scoring**: Every paper displays a percentage match score (e.g., `🎯 60% Match`).
 - **Discipline & Category Filtering**: Filter papers by arXiv disciplines (`cs.AI`, `cs.LG`, `cs.CV`, `cs.CL`, `quant-ph`, `stat.ML`, etc.).
-- **User Tags & Custom Taxonomy**: Add and manage custom research tags (e.g., *Machine Learning*, *Quantum Computing*, *Computer Vision*).
+- **User Tags & Custom Taxonomy**: Add and manage custom research tags (e.g., *Machine Learning*, *Quantum Computing*, *Computer Vision*, *Deep Learning*,).
 - **Direct Links**: One-click navigation to arXiv abstract pages and direct PDF downloads.
 - **Hardware Acceleration**: Automatic GPU acceleration via PyTorch and CUDA (with CPU fallback).
 
